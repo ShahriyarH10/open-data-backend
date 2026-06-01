@@ -9,6 +9,9 @@ app.use(cors({
     "http://localhost:3000",
     "http://localhost:5173",
     /\.vercel\.app$/,
+    /\.pages\.dev$/,          // Cloudflare Pages preview URLs
+    /\.cloudflare\.com$/,     // Cloudflare custom domains
+    "https://open-data-frontend.pages.dev", // Cloudflare production
     process.env.FRONTEND_URL,
   ].filter(Boolean),
 }));
