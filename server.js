@@ -11,7 +11,8 @@ app.use(cors({
     /\.vercel\.app$/,
     /\.pages\.dev$/,          // Cloudflare Pages preview URLs
     /\.cloudflare\.com$/,     // Cloudflare custom domains
-    "https://open-data-frontend.pages.dev", // Cloudflare production
+    "https://open-data-frontend.pages.dev",
+    "https://open-data-frontend.onrender.com/", // Cloudflare production
     process.env.FRONTEND_URL,
   ].filter(Boolean),
 }));
