@@ -4,16 +4,27 @@ const NodeCache = require("node-cache");
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 300 });
+// Origins are compared without trailing slashes ("https://x.com/" never matches
+// the browser's Origin header "https://x.com", which silently breaks CORS).
+const stripSlash = (u) => (u || "").trim().replace(/\/+$/, "");
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "https://open-data-frontend.pages.dev",
+  "https://open-data-frontend.onrender.com",
+  ...(process.env.FRONTEND_URL || "").split(",").map(stripSlash),
+].filter(Boolean);
+const ALLOWED_PATTERNS = [/\.vercel\.app$/, /\.pages\.dev$/, /\.onrender\.com$/, /\.workers\.dev$/];
+
 app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:5173",
-    /\.vercel\.app$/,
-    /\.pages\.dev$/,          // Cloudflare Pages preview URLs
-    /\.cloudflare\.com$/,     // Cloudflare custom domains
-    "https://open-data-frontend.pages.dev", // Cloudflare production
-    process.env.FRONTEND_URL,
-  ].filter(Boolean),
+  origin(origin, cb) {
+    // No Origin header = curl / server-to-server / same-origin → allow
+    if (!origin) return cb(null, true);
+    const o = stripSlash(origin);
+    const ok = ALLOWED_ORIGINS.includes(o) || ALLOWED_PATTERNS.some(re => re.test(new URL(o).hostname));
+    if (!ok) console.warn("CORS blocked origin:", origin);
+    cb(null, ok);
+  },
 }));
 app.use(express.json());
 
@@ -36,10 +47,10 @@ async function safeFetch(url, { timeout = 13000, headers = {} } = {}, label = "?
 // Safely coerce any value to a plain string
 function str(v, limit = 500) {
   if (!v) return "";
-  if (typeof v === "string") return v.replace(/\s+/g, " ").trim().slice(0, limit);
+  if (typeof v === "string") return v.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
   if (typeof v === "object") {
     const s = v.en || v.fr || v.de || v.nl || Object.values(v).find(x => typeof x === "string") || "";
-    return s.replace(/\s+/g, " ").trim().slice(0, limit);
+    return s.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
   }
   return String(v).slice(0, limit);
 }
@@ -491,12 +502,6 @@ async function fetchWHO(q, limit) {
 // 📁 Figshare — public articles search
 async function fetchFigshare(q, limit) {
   try {
-    const json = await safeFetch(
-      `https://api.figshare.com/v2/articles/search`,
-      { timeout: 12000, headers: { "Content-Type": "application/json" } },
-      "Figshare"
-    );
-    // Figshare search is POST, but let's try GET with query params
     const getJson = await safeFetch(
       `https://api.figshare.com/v2/articles?search_for=${encodeURIComponent(q)}&page_size=${limit}&item_type=3`,
       {}, "Figshare"
@@ -648,11 +653,6 @@ async function fetchICPSR(q, limit) {
 // 🚀 NASA — open data portal
 async function fetchNASA(q, limit) {
   try {
-    const json = await safeFetch(
-      `https://data.nasa.gov/resource/gh4g-9sfh.json?$q=${encodeURIComponent(q)}&$limit=${limit}`,
-      {}, "NASA"
-    );
-    // Also try catalog search
     const catalogJson = await safeFetch(
       `https://data.nasa.gov/api/catalog/v1?q=${encodeURIComponent(q)}&limit=${limit}`,
       {}, "NASA/catalog"
