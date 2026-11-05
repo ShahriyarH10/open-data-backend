@@ -898,6 +898,41 @@ const WORLDWIDE = [
   fetchNL, fetchES, fetchMX, fetchWB, fetchHF, fetchZenodo, fetchHarvard,
 ];
 
+// ─── Relevance scoring ───────────────────────────────────────────────────────
+// Normalize text into comparable word tokens: lowercase, punctuation/hyphens/underscores
+// → spaces, light stemming so "prices"/"price" and "rates"/"rate" match.
+function stem(w) {
+  if (w.length > 4 && w.endsWith("ies")) return w.slice(0, -3) + "y";
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  return w;
+}
+function tokens(text) {
+  return (text || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean).map(stem);
+}
+function relevance(query, r) {
+  const qt = tokens(query);
+  if (!qt.length) return 0;
+  // Hugging Face titles are "owner/dataset-name": score on the dataset name only
+  const rawTitle = r.source === "Hugging Face" ? (r.title || "").split("/").pop() : r.title;
+  const tt = tokens(rawTitle);
+  const dt = tokens(r.description);
+  const qs = " " + qt.join(" ") + " ", ts = " " + tt.join(" ") + " ", ds = " " + dt.join(" ") + " ";
+  const tSet = new Set(tt), dSet = new Set(dt), tagSet = new Set(tokens((r.tags || []).join(" ")));
+  const inTitle = qt.filter(w => tSet.has(w)).length;
+  const inAny = qt.filter(w => tSet.has(w) || dSet.has(w) || tagSet.has(w)).length;
+
+  if (ts === qs)                    return 100; // exact title
+  if (ts.startsWith(qs))            return 90;  // title starts with the phrase
+  if (ts.includes(qs))              return 80;  // exact phrase in title
+  if (inTitle === qt.length)        return 70;  // every word in title
+  if (ds.includes(qs))              return 50;  // exact phrase in description
+  if (inAny === qt.length)          return 40;  // every word somewhere
+  if (inTitle > 0)                  return Math.round(30 * inTitle / qt.length); // some words in title
+  if (inAny > 0)                    return Math.round(10 * inAny / qt.length);   // some words elsewhere
+  return 0;
+}
+
 // ─── /api/search ─────────────────────────────────────────────────────────────
 app.get("/api/search", async (req, res) => {
   const { q = "", sources = "", limit = 20 } = req.query;
@@ -909,29 +944,23 @@ app.get("/api/search", async (req, res) => {
 
   const keys = sources ? sources.split(",").map(s => s.trim()).filter(Boolean) : [];
   const fetchers = keys.length > 0 ? keys.map(k => FETCHERS[k]).filter(Boolean) : WORLDWIDE;
-  const perSource = Math.max(5, Math.ceil(parseInt(limit) / fetchers.length) + 3);
+  // Fetch a larger pool per source so the ranking below has good candidates to pick from
+  const perSource = Math.min(25, Math.max(10, Math.ceil(parseInt(limit) / fetchers.length) + 5));
 
   const settled = await Promise.allSettled(fetchers.map(fn => fn(q, perSource)));
   const results = settled.flatMap(r => r.status === "fulfilled" ? r.value : []).filter(Boolean);
-  const unique = Array.from(new Map(results.map(r => [r.id, r])).values());
+  // De-duplicate by id, and by same title from the same source
+  const unique = Array.from(new Map(results.map(r => [r.id, r])).values())
+    .filter((r, i, arr) => arr.findIndex(x => x.source === r.source && tokens(x.title).join(" ") === tokens(r.title).join(" ")) === i);
 
-  // Relevance sort: exact title phrase match → title contains all words → anything else
-  const qLower = q.toLowerCase().trim();
-  const qWords = qLower.split(/\s+/);
-  const scored = unique.map(r => {
-    const t = (r.title || "").toLowerCase();
-    const d = (r.description || "").toLowerCase();
-    let score = 0;
-    if (t === qLower)                                  score = 100; // exact title
-    else if (t.startsWith(qLower))                     score = 90;  // title starts with phrase
-    else if (t.includes(qLower))                       score = 80;  // phrase anywhere in title
-    else if (d.includes(qLower))                       score = 60;  // phrase in description
-    else if (qWords.every(w => t.includes(w)))         score = 50;  // all words in title
-    else if (qWords.every(w => t.includes(w) || d.includes(w))) score = 30; // all words anywhere
-    else if (qWords.some(w => t.includes(w)))          score = 10;  // some words in title
-    return { ...r, _score: score };
-  });
-  scored.sort((a, b) => b._score - a._score);
+  const scored = unique
+    .map(r => ({ ...r, _score: relevance(q, r) }))
+    .filter(r => r._score > 0) // drop results that don't contain any query word
+    .sort((a, b) =>
+      b._score - a._score ||
+      (a.title || "").length - (b.title || "").length || // closer (shorter) title first
+      (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)
+    );
 
   const response = { results: scored.slice(0, parseInt(limit)), total: scored.length, query: q, sources: keys };
   cache.set(cacheKey, response);
